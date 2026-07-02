@@ -27,6 +27,7 @@ const connectDb = async () => {
 }
 
 const app = express()
+app.use(express.json())
 
 // ✅ middleware AFTER app is defined
 app.use(express.json())
@@ -44,12 +45,41 @@ const io = new Server(server, {
     methods: ['GET', 'POST'],
   },
 })
+
+app.post('/emit', async (req, res) => {
+  const { event, userId, data } = req.body
+
+  if (!event || !userId) {
+    return res.status(400).json({ success: false, message: 'event and userId are required' })
+  }
+
+  try {
+    const user = await User.findById(userId)
+
+    if (!user) {
+      console.warn(`emit failed: user ${userId} not found`)
+      return res.status(404).json({ success: false, message: 'User not found' })
+    }
+
+    if (!user.socketId || !user.isOnline) {
+      console.warn(`emit skipped: user ${userId} has no active socket`)
+      return res.json({ success: false, message: 'User is not connected', delivered: false })
+    }
+
+    io.to(user.socketId).emit(event, data)
+    console.log(`emitted "${event}" to user ${userId} (socket ${user.socketId})`)
+    return res.json({ success: true, delivered: true })
+  } catch (error) {
+    console.error('emit error:', error.message)
+    return res.status(500).json({ success: false, message: error.message })
+  }
+})
 io.on('connection', (socket) => {
   console.log('connected:', socket.id)
 
   socket.on('identity', async (data) => {
     const userId = typeof data === 'string' ? data : data?.userId  
-    if (!userId) return
+    if (!userId) return;
 
     socket.userId = userId
     try {
@@ -73,7 +103,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('disconnect', async () => {
-    if (!socket.userId) return
+    if (!socket.userId) return;
     try {
       await User.findByIdAndUpdate(socket.userId, {
         socketId: null,

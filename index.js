@@ -46,6 +46,7 @@ const io = new Server(server, {
   },
 })
 
+// emit to a single user's personal socket (existing behavior, unchanged)
 app.post('/emit', async (req, res) => {
   const { event, userId, data } = req.body
 
@@ -74,6 +75,31 @@ app.post('/emit', async (req, res) => {
     return res.status(500).json({ success: false, message: error.message })
   }
 })
+
+// emit to everyone in a ride room (driver + rider), e.g. after an OTP verify
+// route flips bookingStatus. Call this from your Next.js API routes:
+//   axios.post(`${SOCKET_BASE_URL}/emit-room`, {
+//     event: 'booking-status-update',
+//     bookingId,
+//     data: { bookingStatus, booking },
+//   })
+app.post('/emit-room', (req, res) => {
+  const { event, bookingId, data } = req.body
+
+  if (!event || !bookingId) {
+    return res.status(400).json({ success: false, message: 'event and bookingId are required' })
+  }
+
+  try {
+    io.to(`ride-${bookingId}`).emit(event, data)
+    console.log(`emitted "${event}" to room ride-${bookingId}`)
+    return res.json({ success: true, delivered: true })
+  } catch (error) {
+    console.error('emit-room error:', error.message)
+    return res.status(500).json({ success: false, message: error.message })
+  }
+})
+
 io.on('connection', (socket) => {
   console.log('connected:', socket.id)
 
@@ -94,6 +120,7 @@ io.on('connection', (socket) => {
   })
 
   socket.on('update-location',async({userId,latitude,longitude})=>{
+    
      await User.findByIdAndUpdate(userId,{
         location:{
             type:'Point',
@@ -101,6 +128,29 @@ io.on('connection', (socket) => {
         }
      })
   })
+
+  socket.on('join-ride',(bookingId)=>{
+    console.log('join-ride',bookingId)
+    socket.join(`ride-${bookingId}`)
+  })
+
+  // forward status alongside lat/lng so riders get a lightweight,
+  // best-effort status sync riding along with every GPS ping
+  // (the authoritative status change is still broadcast via
+  // 'booking-status-update' through the /emit-room endpoint above)
+  socket.on('driver-location-update',({bookingId,longitude,latitude,status})=>{
+      console.log('EMITTING TO ROOM:', `ride-${bookingId}`, 'status:', status)
+     io.to(`ride-${bookingId}`).emit("driver-location",{
+      latitude,
+      longitude,
+      status
+     })
+  })
+
+  socket.on('send-chat-message', (message) => {
+    const { bookingId } = message
+    socket.to(`ride-${bookingId}`).emit('new-chat-message', message)
+})
 
   socket.on('disconnect', async () => {
     if (!socket.userId) return;
